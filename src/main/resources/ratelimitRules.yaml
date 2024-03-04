@@ -1,0 +1,17 @@
+# 2 requests per minute per account Id
+- accountId: ""
+  allowedNumberOfRequests: 2
+  timeInterval: MINUTE
+# 1 Slow request per account per minute
+- accountId: ""
+  allowedNumberOfRequests: 1
+  timeInterval: MINUTE
+  requestType: SLOW
+# 1 request for 192.168.100.150 per HOUR
+- clientIp: 192.168.100.150
+  allowedNumberOfRequests: 1
+  timeInterval: HOUR
+# 10 requests for important customer per minute
+- accountId: ImportantCustomerId
+  allowedNumberOfRequests: 10
+  timeInterval: MINUTE

@@ -1,0 +1,39 @@
+plugins {
+    id 'org.springframework.boot' version '2.7.4'
+    id 'io.spring.dependency-management' version '1.0.14.RELEASE'
+    id 'java'
+}
+
+compileJava {
+    sourceCompatibility = '1.8'
+    targetCompatibility = '1.8'
+}
+repositories {
+    mavenCentral()
+}
+
+wrapper {
+    gradleVersion = '7.5.1'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    // We have 2 different Redis driver dependencies as Lab contain optional part with Lettuce
+    implementation 'redis.clients:jedis:4.2.3'
+    implementation 'io.lettuce:lettuce-core:6.2.0.RELEASE'
+    // https://mvnrepository.com/artifact/com.fasterxml.jackson.dataformat/jackson-dataformat-yaml
+    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.13.4'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jdk8:2.13.4'
+
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // https://mvnrepository.com/artifact/org.testcontainers/testcontainers
+    testImplementation 'org.testcontainers:testcontainers:1.17.3'
+    testImplementation "org.testcontainers:junit-jupiter:1.17.3"
+
+
+}
