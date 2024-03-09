@@ -1,13 +1,12 @@
 package com.epam.jmp.redislab.service;
 
 import com.epam.jmp.redislab.api.RequestDescriptor;
+import reactor.core.publisher.Mono;
 
 import java.util.Set;
 
 public interface RateLimitService {
 
-    default boolean shouldLimit(Set<RequestDescriptor> requestDescriptors) {
-        return false;
-    }
+    Mono<Boolean> shouldLimit(Set<RequestDescriptor> requestDescriptors);
 
 }

@@ -7,6 +7,8 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.function.ServerResponse;
+import reactor.core.publisher.Mono;
 
 @RestController
 @RequestMapping("/api/v1/ratelimit/fixedwindow")
@@ -18,12 +20,24 @@ public class FixedWindowRateLimitController {
         this.rateLimitService = rateLimitService;
     }
 
+//    @PostMapping
+//    public ResponseEntity<Void> shouldRateLimit(@RequestBody RateLimitRequest rateLimitRequest) {
+//        if (rateLimitService.shouldLimit(rateLimitRequest.getDescriptors())) {
+//            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
+//        }
+//        return ResponseEntity.ok().build();
+//    }
+
     @PostMapping
-    public ResponseEntity<Void> shouldRateLimit(@RequestBody RateLimitRequest rateLimitRequest) {
-        if (rateLimitService.shouldLimit(rateLimitRequest.getDescriptors())) {
-            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
-        }
-        return ResponseEntity.ok().build();
+    public Mono<ResponseEntity<Void>> shouldRateLimit(@RequestBody RateLimitRequest rateLimitRequest) {
+        return rateLimitService.shouldLimit(rateLimitRequest.getDescriptors())
+                .map(isRateLimited -> {
+                    if (isRateLimited) {
+                        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
+                    } else {
+                        return ResponseEntity.ok().build();
+                    }
+                });
     }
 
 }

@@ -3,16 +3,16 @@ package com.epam.jmp.redislab.service;
 import com.epam.jmp.redislab.api.RequestDescriptor;
 import com.epam.jmp.redislab.configuration.ratelimit.RateLimitRule;
 import com.epam.jmp.redislab.configuration.ratelimit.RateLimitTimeInterval;
+import io.lettuce.core.cluster.api.StatefulRedisClusterConnection;
+import io.lettuce.core.cluster.api.async.RedisAdvancedClusterAsyncCommands;
+import io.lettuce.core.cluster.api.sync.RedisAdvancedClusterCommands;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-import org.springframework.util.CollectionUtils;
-import redis.clients.jedis.JedisCluster;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import javax.annotation.PostConstruct;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -30,7 +30,7 @@ public class JedisRateLimitService implements RateLimitService {
     public static final String ALL_ACCOUNTS = "allAccounts";
 
     @Autowired
-    private JedisCluster jedisCluster;
+    private StatefulRedisClusterConnection<String, String> lettuceRedisClusterConnection;
 
     @Autowired
     private Set<RateLimitRule> rateLimitRules;
@@ -41,6 +41,8 @@ public class JedisRateLimitService implements RateLimitService {
     }
 
     private void saveRateLimitRules() {
+        RedisAdvancedClusterCommands<String, String> syncCommands = lettuceRedisClusterConnection.sync();
+
         for (RateLimitRule rule : rateLimitRules) {
             String accountId = rule.getAccountId().orElse(EMPTY);
             String clientIp = rule.getClientIp().orElse(EMPTY);
@@ -50,17 +52,70 @@ public class JedisRateLimitService implements RateLimitService {
 
             String key = buildKeyString(accountId, clientIp, requestType);
 
-            Map<String, String> rules = buildRuleMap(accountId, clientIp,
-                    requestType, allowedNumberOfRequests, timeInterval);
+            Map<String, String> rules = buildRuleMap(accountId, clientIp, requestType, allowedNumberOfRequests, timeInterval);
 
-            jedisCluster.hmset(key, rules);
+            syncCommands.hmset(key, rules);
+
             if (accountId.isEmpty() && EMPTY.equals(requestType)) {
-                jedisCluster.hmset(ALL_ACCOUNTS, rules);
+                syncCommands.hmset(ALL_ACCOUNTS, rules);
             }
             if (!EMPTY.equals(requestType)) {
-                jedisCluster.hmset(requestType, rules);
+                syncCommands.hmset(requestType, rules);
             }
         }
+    }
+
+    @Override
+    public Mono<Boolean> shouldLimit(Set<RequestDescriptor> requestDescriptors) {
+        RedisAdvancedClusterAsyncCommands<String, String> asyncCommands = lettuceRedisClusterConnection.async();
+
+        return Flux.fromIterable(requestDescriptors)
+                .flatMap(descriptor -> {
+                    String descriptorAccountId = descriptor.getAccountId().orElse(EMPTY);
+                    String descriptorClientIp = descriptor.getClientIp().orElse(EMPTY);
+                    String descriptorRequestType = descriptor.getRequestType().orElse(EMPTY);
+
+                    return findRequestRuleReactive(descriptorAccountId, descriptorClientIp, descriptorRequestType)
+                            .map(values -> new AbstractMap.SimpleEntry<>(descriptor, values));
+                })
+                .flatMap(requestRule -> {
+                    RequestDescriptor descriptor = requestRule.getKey();
+                    Map<String, String> values = requestRule.getValue();
+
+                    if (!values.isEmpty()) {
+                        int allowedNumberOfRequests = Integer.parseInt(values.get(ALLOWED_NUMBER_OF_REQUESTS));
+                        String timeInterval = values.get(TIME_INTERVAL);
+
+                        String rateCountKey = initRateCountKey(descriptor.getAccountId().orElse(EMPTY), descriptor.getClientIp().orElse(EMPTY), descriptor.getRequestType().orElse(EMPTY));
+
+                        return Mono.fromFuture(() -> asyncCommands.incr(rateCountKey).toCompletableFuture())
+                                .flatMap(count -> {
+                                    if (count == 1L) {
+                                        return Mono.fromFuture(() -> asyncCommands.expire(rateCountKey, getTimeValueInSeconds(timeInterval)).toCompletableFuture())
+                                                .map(value -> count);
+                                    } else {
+                                        return Mono.just(count);
+                                    }
+                                })
+                                .map(count -> count > allowedNumberOfRequests);
+                    } else {
+                        return Mono.just(false);
+                    }
+                })
+                .reduce(Boolean::logicalOr)
+                .defaultIfEmpty(false);
+
+    }
+
+    private Mono<Map<String, String>> findRequestRuleReactive(String descriptorAccountId, String descriptorClientIp, String descriptorRequestType) {
+        String key = buildKeyString(descriptorAccountId, descriptorClientIp, descriptorRequestType);
+        RedisAdvancedClusterAsyncCommands<String, String> asyncCommands = lettuceRedisClusterConnection.async();
+
+        return Flux.fromIterable(Arrays.asList(key, descriptorRequestType, ALL_ACCOUNTS))
+                .flatMap(possibleKey -> Mono.fromFuture(() -> asyncCommands.hgetall(possibleKey).toCompletableFuture()))
+                .filter(values -> !values.isEmpty())
+                .next()
+                .switchIfEmpty(Mono.just(Collections.emptyMap()));
     }
 
     private Map<String, String> buildRuleMap(String accountId, String clientIp, String requestType, Integer allowedNumberOfRequests, RateLimitTimeInterval timeInterval) {
@@ -80,33 +135,6 @@ public class JedisRateLimitService implements RateLimitService {
     }
 
 
-    @Override
-    public boolean shouldLimit(Set<RequestDescriptor> requestDescriptors) {
-        boolean isRateLimitReached = false;
-        for (RequestDescriptor descriptor : requestDescriptors) {
-            String descriptorAccountId = descriptor.getAccountId().orElse(EMPTY);
-            String descriptorClientIp = descriptor.getClientIp().orElse(EMPTY);
-            String descriptorRequestType = descriptor.getRequestType().orElse(EMPTY);
-
-            Map<String, String> values = findRequestRule(descriptorAccountId,
-                    descriptorClientIp, descriptorRequestType);
-
-            if (!CollectionUtils.isEmpty(values)) {
-                int allowedNumberOfRequests = Integer.parseInt(values.get(ALLOWED_NUMBER_OF_REQUESTS));
-                String timeInterval = values.get(TIME_INTERVAL);
-
-                String rateCountKey = initRateCountKey(descriptorAccountId,
-                        descriptorClientIp, descriptorRequestType);
-                long count = jedisCluster.incr(rateCountKey);
-                if (count == 1) {
-                    jedisCluster.expire(rateCountKey, getTimeValueInSeconds(timeInterval));
-                }
-                isRateLimitReached = count > allowedNumberOfRequests;
-            }
-        }
-        return isRateLimitReached;
-    }
-
     private int getTimeValueInSeconds(String timeInterval) {
         int timeValueInSeconds = 0;
         if (timeInterval.equals(RateLimitTimeInterval.MINUTE.name())) {
@@ -124,16 +152,4 @@ public class JedisRateLimitService implements RateLimitService {
                 + DELIMITER + descriptorRequestType;
     }
 
-    private Map<String, String> findRequestRule(String descriptorAccountId,
-                                                String descriptorClientIp, String descriptorRequestType) {
-        String key = buildKeyString(descriptorAccountId, descriptorClientIp, descriptorRequestType);
-        Map<String, String> values = null;
-        for (String possibleKey : Arrays.asList(key, descriptorRequestType, ALL_ACCOUNTS)) {
-            values = jedisCluster.hgetAll(possibleKey);
-            if (!CollectionUtils.isEmpty(values)) {
-                break;
-            }
-        }
-        return values;
-    }
 }
